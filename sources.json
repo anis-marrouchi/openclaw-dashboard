@@ -1,0 +1,17 @@
+{
+  "sources": [
+    {
+      "id": "server",
+      "name": "Server Gateway",
+      "type": "local",
+      "enabled": true
+    },
+    {
+      "id": "mac",
+      "name": "Mac Gateway",
+      "type": "remote-dashboard",
+      "enabled": false,
+      "baseUrl": "http://100.67.108.119:8091"
+    }
+  ]
+}

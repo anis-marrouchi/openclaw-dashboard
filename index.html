@@ -87,6 +87,29 @@ code { font-family:'SF Mono',Consolas,monospace; font-size:11px; background:var(
 .section { margin-bottom:24px; }
 .section-head { font-size:13px; font-weight:600; margin-bottom:12px; display:flex; align-items:center; gap:6px; }
 
+/* Chat UI */
+.chat-wrap { display:grid; grid-template-columns:280px 1fr; gap:12px; min-height:70vh; }
+.chat-sidebar { background:var(--surface); border:1px solid var(--border); border-radius:10px; overflow:hidden; }
+.chat-sidebar-head { padding:10px 12px; border-bottom:1px solid var(--border); font-size:11px; color:var(--text2); text-transform:uppercase; letter-spacing:.5px; }
+.chat-session { padding:10px 12px; border-bottom:1px solid var(--border); cursor:pointer; }
+.chat-session:hover { background:var(--surface2); }
+.chat-session.active { background:rgba(59,130,246,.12); border-left:3px solid var(--blue); padding-left:9px; }
+.chat-main { background:var(--surface); border:1px solid var(--border); border-radius:10px; display:flex; flex-direction:column; height:calc(100vh - 190px); min-height:520px; }
+.chat-head { padding:10px 12px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; }
+.chat-messages { flex:1; overflow:auto; padding:14px; display:flex; flex-direction:column; gap:10px; }
+.chat-bubble { max-width:78%; padding:10px 12px; border-radius:12px; line-height:1.45; font-size:13px; white-space:normal; word-break:break-word; }
+.chat-bubble.user { align-self:flex-end; background:#1f3b66; border:1px solid #2f5b9e; }
+.chat-bubble.assistant { align-self:flex-start; background:var(--surface2); border:1px solid var(--border); }
+.chat-meta { font-size:10px; color:var(--text2); margin-bottom:4px; }
+.chat-tools { display:flex; gap:6px; align-items:center; }
+.chat-compose { border-top:1px solid var(--border); padding:10px; display:flex; gap:8px; position:sticky; bottom:0; background:var(--surface); }
+.chat-compose textarea { flex:1; min-height:42px; max-height:140px; resize:vertical; }
+.icon-btn { width:34px; min-width:34px; padding:0; display:flex; align-items:center; justify-content:center; font-size:14px; }
+.chat-md p { margin:0 0 8px 0; }
+.chat-md p:last-child { margin-bottom:0; }
+.chat-md code { background:#111827; border:1px solid var(--border); }
+@media(max-width:900px){ .chat-wrap{grid-template-columns:1fr;} }
+
 /* Modal */
 .overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:200; align-items:center; justify-content:center; }
 .overlay.open { display:flex; }
@@ -114,6 +137,11 @@ code { font-family:'SF Mono',Consolas,monospace; font-size:11px; background:var(
   <div class="topbar-right">
     <span class="status-dot on" id="dot"></span>
     <span class="status-text" id="status-text">Loading...</span>
+    <select id="source-filter" class="btn" onchange="setSourceFilter(this.value)" title="Source filter">
+      <option value="all">All sources</option>
+      <option value="server">Server</option>
+      <option value="mac">Mac</option>
+    </select>
     <button class="btn" onclick="refreshAll()" title="Refresh">Refresh</button>
   </div>
 </div>
@@ -140,6 +168,7 @@ code { font-family:'SF Mono',Consolas,monospace; font-size:11px; background:var(
     <h2>// Send Message</h2>
     <label>Agent</label><select id="msg-agent"></select>
     <label>Message</label><textarea id="msg-text" placeholder="Type instruction..."></textarea>
+    <div id="msg-result" style="margin-top:8px;font-size:11px;color:var(--text2);white-space:pre-wrap;max-height:180px;overflow:auto"></div>
     <div class="modal-foot">
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="doSendMsg()">Send</button>
@@ -174,6 +203,10 @@ const color = id => COLORS[id]||'#6b7280';
 
 // ---- State ----
 let S = { agents:[], crons:[], sessions:[], issues:[], counts:{} };
+let sourceFilter = 'all';
+let lastRenderSig = '';
+let lastConvoSig = '';
+let suppressAutoScrollOnce = false;
 
 // ---- Fetch ----
 async function api(path) {
@@ -183,13 +216,37 @@ async function api(path) {
   } catch(e) { console.error(path,e); return null; }
 }
 
-async function refreshAll() {
-  document.getElementById('status-text').textContent = 'Refreshing...';
+function calcSig(){
+  const maxSess = Math.max(0, ...(S.sessions||[]).map(x=>Number(x.updatedAt||0)));
+  const maxCron = Math.max(0, ...(S.crons||[]).map(x=>Number(x.updatedAtMs||x.createdAtMs||0)));
+  return [currentTab, sourceFilter, S.agents.length, S.crons.length, S.sessions.length, S.issues.length, maxSess, maxCron].join('|');
+}
+
+function updateStatusBar(){
+  document.getElementById('dot').className = 'status-dot on';
+  const srcs = [...new Set((S.agents||[]).map(a=>a.sourceId||'server'))].join(', ');
+  const sf = document.getElementById('source-filter'); if (sf) sf.value = sourceFilter;
+  const fa = filteredAgents();
+  const fc = filteredCrons();
+  const activeCrons = fc.filter(c=>c.enabled).length;
+  document.getElementById('status-text').textContent = `${fa.length} agents | ${activeCrons} crons active | ${S.issues.length} issues | sources: ${srcs} | filter: ${sourceFilter}`;
+}
+
+async function refreshAll(force=false) {
+  if (force) document.getElementById('status-text').textContent = 'Refreshing...';
   const [overview, issues] = await Promise.all([api('/api/overview'), api('/api/issues')]);
   if (overview) { S.agents = overview.agents; S.crons = overview.crons; S.sessions = overview.sessions; S.counts = overview.counts; }
   if (Array.isArray(issues)) S.issues = issues;
-  document.getElementById('dot').className = 'status-dot on';
-  document.getElementById('status-text').textContent = `${S.agents.length} agents | ${S.counts.activeCrons||0} crons active | ${S.issues.length} issues`;
+  updateStatusBar();
+
+  const sig = calcSig();
+  if (!force && sig === lastRenderSig && currentTab !== 'convos') return;
+  lastRenderSig = sig;
+
+  if (currentTab === 'convos') {
+    await loadConvo(true);
+    return;
+  }
   renderCurrentTab();
 }
 
@@ -208,7 +265,7 @@ function renderCurrentTab() {
 }
 
 // ---- Agent helpers ----
-function agentCrons(id) { return S.crons.filter(c => c.agentId === id); }
+function agentCrons(id) { return filteredCrons().filter(c => c.agentId === id); }
 function agentIssues(id) {
   const map = {'marketing-agent':['nadia'],'qa-forensics-agent':['QA','bug','forensic'],'main':['atlas-roadmap','agent-infra']};
   const tags = map[id]||[];
@@ -217,28 +274,48 @@ function agentIssues(id) {
     return tags.some(t => lbl.includes(t.toLowerCase())) || (i.assignee||'') === id.replace('-agent','');
   });
 }
-function hasSession(id) { return S.sessions.some(s => (s.agentId||'') === id || (s.key||'').includes(id)); }
+function hasSession(id) { return filteredSessions().some(s => (s.agentId||'') === id || (s.key||'').includes(id)); }
+function filteredAgents(){ return sourceFilter==='all' ? S.agents : S.agents.filter(a => (a.sourceId||'server')===sourceFilter); }
+function filteredCrons(){ return sourceFilter==='all' ? S.crons : S.crons.filter(c => (c.sourceId||'server')===sourceFilter); }
+function filteredSessions(){ return sourceFilter==='all' ? S.sessions : S.sessions.filter(s => (s.sourceId||'server')===sourceFilter || (s.key||'').includes(`source:${sourceFilter}`)); }
+function setSourceFilter(v){ sourceFilter=v||'all'; updateStatusBar(); renderCurrentTab(); }
 
 // ---- Render: Overview ----
 function renderOverview() {
   const el = document.getElementById('view-overview');
-  const m = S.counts;
+  const agents = filteredAgents();
+  const crons = filteredCrons();
+  const sessions = filteredSessions();
   el.innerHTML = `
     <div class="metrics">
-      <div class="metric"><div class="val" style="color:var(--blue)">${m.agents||0}</div><div class="lbl">Agents</div></div>
-      <div class="metric"><div class="val" style="color:var(--green)">${m.sessions||0}</div><div class="lbl">Sessions</div></div>
-      <div class="metric"><div class="val" style="color:var(--orange)">${m.activeCrons||0}</div><div class="lbl">Active Crons</div></div>
+      <div class="metric"><div class="val" style="color:var(--blue)">${agents.length}</div><div class="lbl">Agents</div></div>
+      <div class="metric"><div class="val" style="color:var(--green)">${sessions.length}</div><div class="lbl">Sessions</div></div>
+      <div class="metric"><div class="val" style="color:var(--orange)">${crons.filter(c=>c.enabled).length}</div><div class="lbl">Active Crons</div></div>
       <div class="metric"><div class="val" style="color:var(--purple)">${S.issues.length}</div><div class="lbl">Open Issues</div></div>
     </div>
     <div class="section">
       <div class="section-head">Agents</div>
-      <div class="grid">${S.agents.map(agentCard).join('')}</div>
+      <div class="grid">${agents.map(agentCard).join('')}</div>
     </div>
     <div class="section">
       <div class="section-head">Upcoming Crons</div>
-      ${cronMiniTable(S.crons.filter(c=>c.enabled&&c.state?.nextRunAtMs).sort((a,b)=>a.state.nextRunAtMs-b.state.nextRunAtMs).slice(0,6))}
+      ${cronMiniTable(crons.filter(c=>c.enabled&&c.state?.nextRunAtMs).sort((a,b)=>a.state.nextRunAtMs-b.state.nextRunAtMs).slice(0,6))}
     </div>
   `;
+}
+
+function sourceBadge(src){
+  if(!src) return '';
+  const color = src==='mac' ? 'var(--purple)' : 'var(--blue)';
+  const label = src==='mac' ? 'MAC' : src.toUpperCase();
+  return `<span class="badge" style="background:${color};color:white">${label}</span>`;
+}
+
+function capabilityTags(a){
+  // Workspace-derived capabilities (not OpenClaw skill registry)
+  if(a.id !== 'marketing-agent') return '';
+  const caps = ['bird', 'linkedin', 'ga4', 'gsc', 'brevo'];
+  return `<div class="agent-skills" style="margin-top:6px">${caps.map(c=>`<span class="skill-tag" style="border-color:var(--purple);color:#cdb4ff">${c}</span>`).join('')}</div>`;
 }
 
 function agentCard(a) {
@@ -246,12 +323,13 @@ function agentCard(a) {
   const active = hasSession(a.id);
   const nc = agentCrons(a.id).length;
   const ni = agentIssues(a.id).length;
+  const displayName = a.id==='main' ? 'Atlas' : a.name;
   return `
   <div class="card agent-card">
     <div class="bar" style="background:${c}"></div>
     <div class="agent-header">
-      <div><div class="agent-name">${a.name}</div><div class="agent-id">${a.id}</div></div>
-      <span class="badge ${active?'badge-active':'badge-idle'}">${active?'ACTIVE':'IDLE'}</span>
+      <div><div class="agent-name">${displayName}</div><div class="agent-id">${a.id}</div></div>
+      <div style="display:flex;gap:6px;align-items:center">${sourceBadge(a.sourceId)}<span class="badge ${active?'badge-active':'badge-idle'}">${active?'ACTIVE':'IDLE'}</span></div>
     </div>
     <div class="agent-stats">
       <span>${nc} crons</span>
@@ -259,8 +337,9 @@ function agentCard(a) {
       <span>${a.toolsProfile}</span>
     </div>
     <div class="agent-skills">${a.skills.map(s=>`<span class="skill-tag">${s}</span>`).join('')||'<span class="skill-tag">default</span>'}</div>
+    ${capabilityTags(a)}
     <div class="agent-actions">
-      <button class="btn btn-sm" onclick="openMsg('${a.id}')">Message</button>
+      <button class="btn btn-sm" onclick="openMsg('${a.id}','${a.sourceId||'server'}')">Message</button>
       <button class="btn btn-sm" onclick="openTask('${a.id}')">Assign Task</button>
     </div>
   </div>`;
@@ -268,25 +347,28 @@ function agentCard(a) {
 
 // ---- Render: Agents detail ----
 function renderAgents() {
-  document.getElementById('view-agents').innerHTML = `<div class="grid">${S.agents.map(a => {
+  const agents = filteredAgents();
+  document.getElementById('view-agents').innerHTML = `<div class="grid">${agents.map(a => {
     const c = color(a.id);
     const crons = agentCrons(a.id);
     const issues = agentIssues(a.id);
+    const displayName = a.id==='main' ? 'Atlas' : a.name;
     return `
     <div class="card agent-card">
       <div class="bar" style="background:${c}"></div>
       <div class="agent-header">
-        <div><div class="agent-name">${a.name}</div><div class="agent-id">${a.id}</div></div>
-        <span class="badge ${hasSession(a.id)?'badge-active':'badge-idle'}">${hasSession(a.id)?'ACTIVE':'IDLE'}</span>
+        <div><div class="agent-name">${displayName}</div><div class="agent-id">${a.id}</div></div>
+        <div style="display:flex;gap:6px;align-items:center">${sourceBadge(a.sourceId)}<span class="badge ${hasSession(a.id)?'badge-active':'badge-idle'}">${hasSession(a.id)?'ACTIVE':'IDLE'}</span></div>
       </div>
       <div class="agent-stats"><span>Workspace: <code>${a.workspace}</code></span></div>
       <div class="agent-skills">${a.skills.map(s=>`<span class="skill-tag">${s}</span>`).join('')||'<span class="skill-tag">default</span>'}</div>
+      ${capabilityTags(a)}
       <div class="section-head" style="margin-top:10px;font-size:11px">Crons (${crons.length})</div>
       ${crons.length ? `<div style="font-size:11px">${crons.map(c=>`<div style="margin:3px 0;color:var(--text2)"><code>${c.schedule?.expr||'-'}</code> ${c.name||c.id?.substring(0,8)} <span class="badge ${c.enabled?'badge-active':'badge-idle'}" style="font-size:9px">${c.enabled?'ON':'OFF'}</span></div>`).join('')}</div>` : '<div style="font-size:11px;color:var(--text2)">No crons</div>'}
       <div class="section-head" style="margin-top:10px;font-size:11px">Issues (${issues.length})</div>
       ${issues.length ? `<div style="font-size:11px">${issues.slice(0,5).map(i=>`<div style="margin:3px 0"><a href="${i.webUrl}" target="_blank" style="color:var(--blue);text-decoration:none">#${i.iid}</a> ${i.title.substring(0,50)}</div>`).join('')}</div>` : '<div style="font-size:11px;color:var(--text2)">No assigned issues</div>'}
       <div class="agent-actions" style="margin-top:12px">
-        <button class="btn btn-sm" onclick="openMsg('${a.id}')">Message</button>
+        <button class="btn btn-sm" onclick="openMsg('${a.id}','${a.sourceId||'server'}')">Message</button>
         <button class="btn btn-sm" onclick="openTask('${a.id}')">Assign Task</button>
       </div>
     </div>`;
@@ -325,13 +407,15 @@ function renderPipeline() {
 
 // ---- Render: Crons ----
 function renderCrons() {
+  const crons = filteredCrons();
   document.getElementById('view-crons').innerHTML = `<div class="card"><table>
-    <thead><tr><th>Name</th><th>Agent</th><th>Schedule</th><th>TZ</th><th>Next Run</th><th>Status</th></tr></thead>
-    <tbody>${S.crons.map(c=>{
+    <thead><tr><th>Name</th><th>Agent</th><th>Source</th><th>Schedule</th><th>TZ</th><th>Next Run</th><th>Status</th></tr></thead>
+    <tbody>${crons.map(c=>{
       const next = c.state?.nextRunAtMs ? new Date(c.state.nextRunAtMs).toLocaleString() : '-';
       return `<tr>
         <td><strong>${c.name||c.id?.substring(0,12)||'-'}</strong></td>
         <td style="color:${color(c.agentId||'main')}">${c.agentId||'main'}</td>
+        <td>${c.sourceId||'server'}</td>
         <td><code>${c.schedule?.expr||c.schedule?.kind||'-'}</code></td>
         <td style="font-size:11px;color:var(--text2)">${c.schedule?.tz||'UTC'}</td>
         <td style="font-size:11px">${next}</td>
@@ -355,19 +439,45 @@ function cronMiniTable(list) {
 
 // ---- Modals ----
 function closeModal() { document.querySelectorAll('.overlay').forEach(m=>m.classList.remove('open')); }
-function populateSelect(selId) { document.getElementById(selId).innerHTML = S.agents.map(a=>`<option value="${a.id}">${a.name}</option>`).join(''); }
-function openMsg(agentId) { populateSelect('msg-agent'); document.getElementById('msg-agent').value=agentId; document.getElementById('modal-msg').classList.add('open'); }
+function populateSelect(selId) {
+  document.getElementById(selId).innerHTML = filteredAgents().map(a=>`<option value="${a.id}" data-source="${a.sourceId||'server'}">${a.name} [${(a.sourceId||'server').toUpperCase()}]</option>`).join('');
+}
+function openMsg(agentId, sourceId='server') {
+  populateSelect('msg-agent');
+  const sel = document.getElementById('msg-agent');
+  sel.value = agentId;
+  sel.dataset.source = sourceId;
+  document.getElementById('msg-result').textContent = '';
+  document.getElementById('modal-msg').classList.add('open');
+}
 function openTask(agentId) { populateSelect('task-agent'); document.getElementById('task-agent').value=agentId; document.getElementById('modal-task').classList.add('open'); }
 
 async function doSendMsg() {
-  const agent = document.getElementById('msg-agent').value;
-  const text = document.getElementById('msg-text').value;
+  const sel = document.getElementById('msg-agent');
+  const opt = sel.options[sel.selectedIndex];
+  const agent = sel.value;
+  const source = opt?.dataset?.source || sel.dataset.source || 'server';
+  const text = document.getElementById('msg-text').value.trim();
   if(!text) return;
-  // Send via Atlas main session relay
-  toast('Sending to '+agent+'...');
-  // For now, POST is not wired — show instruction
-  toast('Use WhatsApp: "message '+agent+': '+text.substring(0,40)+'..."');
-  closeModal(); document.getElementById('msg-text').value='';
+  const resultEl = document.getElementById('msg-result');
+  resultEl.textContent = 'Sending...';
+  try {
+    const r = await fetch('/api/chat', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ agentId: agent, message: text, source, timeoutSeconds: 120 })
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'chat failed');
+    const reply = data?.result?.reply || data?.result?.output || data?.result?.assistant || data?.result?.message || data?.result?.raw || JSON.stringify(data.result || {}, null, 2);
+    resultEl.textContent = `Reply (${(data.sourceId||source).toUpperCase()}):\n${typeof reply==='string' ? reply : JSON.stringify(reply,null,2)}`;
+    document.getElementById('msg-text').value='';
+    toast('Reply received from '+agent);
+    setTimeout(()=>{ closeModal(); }, 1200);
+  } catch (e) {
+    resultEl.textContent = `Error: ${e.message}`;
+    toast('Failed to send');
+  }
 }
 
 async function doAssignTask() {
@@ -386,62 +496,279 @@ function toast(msg) {
 
 document.querySelectorAll('.overlay').forEach(m=>m.addEventListener('click',e=>{if(e.target===m)closeModal()}));
 
-// ---- Render: Conversations ----
+// ---- Render: Conversations (real chat) ----
 let convoAgent = 'main';
+let convoSource = 'server';
+let convoSessions = [];
+let selectedSessionKey = null;
+const chatSelKey = () => `chat:selected:${convoSource}:${convoAgent}`;
 
 async function renderConvos() {
   const el = document.getElementById('view-convos');
+  const agentButtons = filteredAgents().map(a=>{
+    const displayName = a.id==='main' ? 'Atlas' : a.name;
+    return `<button class="btn btn-sm ${a.id===convoAgent?'btn-primary':''}" onclick="switchConvoAgent('${a.id}','${a.sourceId||'server'}')" style="border-left:3px solid ${color(a.id)}">${displayName} [${(a.sourceId||'server').toUpperCase()}]</button>`;
+  }).join('');
+
   el.innerHTML = `
-    <div style="display:flex;gap:8px;margin-bottom:16px;align-items:center;flex-wrap:wrap">
+    <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;flex-wrap:wrap">
       <span style="font-size:12px;color:var(--text2)">Agent:</span>
-      ${S.agents.map(a=>`<button class="btn btn-sm ${a.id===convoAgent?'btn-primary':''}" onclick="switchConvoAgent('${a.id}')" style="border-left:3px solid ${color(a.id)}">${a.name}</button>`).join('')}
+      ${agentButtons || '<span style="font-size:12px;color:var(--text2)">No agents in current filter</span>'}
+      <button class="btn btn-sm" onclick="loadConvo(true)">Refresh Chat</button>
     </div>
-    <div id="convo-body" style="color:var(--text2);font-size:12px">Loading conversations...</div>
+    <div class="chat-wrap">
+      <div class="chat-sidebar">
+        <div class="chat-sidebar-head">Conversations</div>
+        <div id="convo-list" style="max-height:68vh;overflow:auto"></div>
+      </div>
+      <div class="chat-main">
+        <div class="chat-head">
+          <div id="chat-title" style="font-size:13px;font-weight:600">Loading…</div>
+          <div class="chat-tools">
+            <button class="btn btn-sm" onclick="jumpToLatest()">Latest</button>
+            <div style="font-size:11px;color:var(--text2)">Source: <span id="chat-source">${convoSource.toUpperCase()}</span></div>
+          </div>
+        </div>
+        <div id="chat-messages" class="chat-messages"></div>
+        <div class="chat-compose">
+          <input id="chat-file" type="file" style="display:none" onchange="attachFile(event)">
+          <button class="btn icon-btn" title="Attach" onclick="document.getElementById('chat-file').click()">ATT</button>
+          <button class="btn icon-btn" id="mic-btn" title="Speech to text" onclick="toggleDictation()">MIC</button>
+          <textarea id="chat-input" placeholder="Type a message to the selected agent... (Enter to send, Shift+Enter newline)" onkeydown="chatInputKey(event)"></textarea>
+          <button class="btn btn-primary" onclick="sendChat()">Send</button>
+        </div>
+      </div>
+    </div>
   `;
-  loadConvo();
+
+  await loadConvo();
 }
 
-async function switchConvoAgent(id) {
+function switchConvoAgent(id, source='server') {
   convoAgent = id;
+  convoSource = source || 'server';
+  selectedSessionKey = null;
   renderConvos();
 }
 
-async function loadConvo() {
-  const data = await api('/api/conversations?agent='+convoAgent+'&limit=40');
-  const body = document.getElementById('convo-body');
-  if (!data || !data.sessions || data.sessions.length === 0) {
-    body.innerHTML = '<div class="card" style="color:var(--text2);font-size:13px">No conversations found for this agent.</div>';
+async function loadConvo(forceKeepSelection=false) {
+  const data = await api('/api/conversations?source='+encodeURIComponent(convoSource)+'&agent='+encodeURIComponent(convoAgent)+'&limit=120');
+  convoSessions = (data && Array.isArray(data.sessions)) ? data.sessions : [];
+
+  const saved = localStorage.getItem(chatSelKey());
+  if ((!forceKeepSelection || !selectedSessionKey) && saved) selectedSessionKey = saved;
+  if (!forceKeepSelection || !convoSessions.some(s=>s.key===selectedSessionKey)) {
+    selectedSessionKey = convoSessions[0]?.key || null;
+  }
+  if (selectedSessionKey) localStorage.setItem(chatSelKey(), selectedSessionKey);
+
+  const sig = JSON.stringify((convoSessions||[]).map(s=>[s.key,s.updatedAt,s.messageCount]));
+  if (sig === lastConvoSig && forceKeepSelection) return;
+  lastConvoSig = sig;
+
+  renderConvoList();
+  renderChatPane();
+}
+
+function renderConvoList() {
+  const el = document.getElementById('convo-list');
+  if (!el) return;
+  if (!convoSessions.length) {
+    el.innerHTML = '<div style="padding:12px;color:var(--text2);font-size:12px">No conversations yet.</div>';
     return;
   }
-  body.innerHTML = data.sessions.map(sess => {
-    const label = sess.key.replace('agent:'+convoAgent+':', '');
+  el.innerHTML = convoSessions.map(sess => {
+    const label = friendlySessionName(sess.key || '', convoAgent);
     const time = sess.updatedAt ? new Date(sess.updatedAt).toLocaleString() : '';
-    return `
-    <details class="card" style="cursor:pointer;padding:0">
-      <summary style="padding:12px 16px;font-size:12px;display:flex;justify-content:space-between;align-items:center">
-        <div>
-          <span style="font-weight:600;color:var(--text)">${escHtml(label)}</span>
-          <span style="margin-left:8px;font-size:10px;color:var(--text2)">${sess.messageCount} msgs</span>
-        </div>
-        <span style="font-size:10px;color:var(--text2)">${time}</span>
-      </summary>
-      <div style="padding:0 16px 14px;max-height:500px;overflow-y:auto">
-        ${sess.messages.map(m => `
-          <div style="margin:6px 0;display:flex;gap:8px">
-            <div style="min-width:60px;font-size:10px;font-weight:600;padding-top:2px;color:${m.role==='user'?'var(--blue)':'var(--green)'}">${m.role==='user'?'USER':'AGENT'}</div>
-            <div style="font-size:12px;line-height:1.5;color:var(--text);flex:1;word-break:break-word;white-space:pre-wrap">${escHtml(m.text)}</div>
-          </div>
-        `).join('<div style="border-top:1px solid var(--border);margin:4px 60px 4px 68px"></div>')}
-      </div>
-    </details>`;
+    return `<div class="chat-session ${sess.key===selectedSessionKey?'active':''}" onclick="selectSession('${escAttr(sess.key)}')">
+      <div style="font-size:12px;font-weight:600">${escHtml(label)}</div>
+      <div style="font-size:10px;color:var(--text2);margin-top:4px">${sess.messageCount} msgs • ${escHtml(time)}</div>
+    </div>`;
   }).join('');
 }
 
-function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function selectSession(key) {
+  selectedSessionKey = key;
+  localStorage.setItem(chatSelKey(), key);
+  renderConvoList();
+  renderChatPane();
+}
+
+function renderChatPane() {
+  const titleEl = document.getElementById('chat-title');
+  const srcEl = document.getElementById('chat-source');
+  const msgEl = document.getElementById('chat-messages');
+  if (!titleEl || !msgEl) return;
+
+  const nearBottom = (msgEl.scrollHeight - msgEl.scrollTop - msgEl.clientHeight) < 60;
+
+  const agent = S.agents.find(a => a.id===convoAgent && (a.sourceId||'server')===convoSource) || S.agents.find(a=>a.id===convoAgent) || { name: convoAgent, id: convoAgent };
+  const agentDisplay = agent.id==='main' ? 'Atlas' : (agent.name || agent.id);
+  const sess = convoSessions.find(s => s.key === selectedSessionKey);
+
+  titleEl.textContent = `${agentDisplay} chat`;
+  if (srcEl) srcEl.textContent = (convoSource||'server').toUpperCase();
+
+  if (!sess) {
+    msgEl.innerHTML = '<div style="color:var(--text2);font-size:12px">Start the conversation by sending a message below.</div>';
+    return;
+  }
+
+  const ordered = [...(sess.messages||[])].sort((a,b)=>{
+    const ta = a?.ts ? new Date(a.ts).getTime() : 0;
+    const tb = b?.ts ? new Date(b.ts).getTime() : 0;
+    return ta - tb;
+  });
+
+  msgEl.innerHTML = ordered.map(m => {
+    const who = m.role==='user' ? 'Anis' : agentDisplay;
+    const ts = m.ts ? new Date(m.ts).toLocaleTimeString() : '';
+    return `<div class="chat-bubble ${m.role==='user'?'user':'assistant'}">
+      <div class="chat-meta">${escHtml(who)} ${ts ? '• '+escHtml(ts):''}</div>
+      <div class="chat-md">${renderMarkdownSafe(m.text || '')}</div>
+    </div>`;
+  }).join('');
+
+  if (nearBottom || suppressAutoScrollOnce) {
+    msgEl.scrollTop = msgEl.scrollHeight;
+    suppressAutoScrollOnce = false;
+  }
+}
+
+function jumpToLatest(){
+  const msgEl = document.getElementById('chat-messages');
+  if (msgEl) msgEl.scrollTop = msgEl.scrollHeight;
+}
+
+function attachFile(e){
+  const f = e?.target?.files?.[0];
+  if(!f) return;
+  const input = document.getElementById('chat-input');
+  if (input) {
+    input.value = `${input.value ? input.value+'\n' : ''}[Attachment queued: ${f.name} (${Math.round(f.size/1024)} KB)]`;
+    input.focus();
+  }
+  toast('Attachment note added (backend upload next)');
+}
+
+let dictationOn = false;
+let recognizer = null;
+let dictationBase = '';
+function toggleDictation(){
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const btn = document.getElementById('mic-btn');
+  const input = document.getElementById('chat-input');
+  if(!SR){ toast('Speech-to-text not supported in this browser'); return; }
+  if (location.protocol !== 'https:' && !['localhost','127.0.0.1'].includes(location.hostname)) {
+    toast('Speech-to-text may be blocked on non-HTTPS pages');
+  }
+  if(!recognizer){
+    recognizer = new SR();
+    recognizer.lang = 'en-US';
+    recognizer.interimResults = true;
+    recognizer.continuous = true;
+    recognizer.onresult = (ev) => {
+      let finalPart='';
+      let interimPart='';
+      for(let i=0;i<ev.results.length;i++){
+        const part = ev.results[i][0]?.transcript || '';
+        if(ev.results[i].isFinal) finalPart += part;
+        else interimPart += part;
+      }
+      if(input) input.value = `${dictationBase}${dictationBase ? ' ' : ''}${(finalPart + interimPart).trim()}`.trim();
+    };
+    recognizer.onerror = (e)=>{ toast(`Dictation error: ${e.error||'unknown'}`); };
+    recognizer.onend = ()=>{ if(dictationOn){ try{ recognizer.start(); }catch{} } };
+  }
+  dictationOn = !dictationOn;
+  if(dictationOn){
+    dictationBase = (input?.value || '').trim();
+    if(btn) btn.textContent = 'STOP';
+    recognizer.start();
+    toast('Dictation on');
+  } else {
+    if(btn) btn.textContent = 'MIC';
+    recognizer.stop();
+    toast('Dictation off');
+  }
+}
+
+function chatInputKey(e){
+  if(e.key==='Enter' && !e.shiftKey){
+    e.preventDefault();
+    sendChat();
+  }
+}
+
+async function sendChat() {
+  const input = document.getElementById('chat-input');
+  const text = (input?.value || '').trim();
+  if (!text) return;
+
+  const msgEl = document.getElementById('chat-messages');
+  if (msgEl) {
+    msgEl.innerHTML += `<div class="chat-bubble user"><div class="chat-meta">Anis • now</div><div class="chat-md">${renderMarkdownSafe(text)}</div></div>`;
+    msgEl.innerHTML += `<div class="chat-bubble assistant" id="chat-typing"><div class="chat-meta">${escHtml(convoAgent==='main'?'Atlas':convoAgent)} • now</div><div class="chat-md">Thinking…</div></div>`;
+    msgEl.scrollTop = msgEl.scrollHeight;
+  }
+
+  input.value = '';
+  suppressAutoScrollOnce = true;
+
+  try {
+    const r = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agentId: convoAgent, message: text, source: convoSource, timeoutSeconds: 180 })
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'chat failed');
+
+    await loadConvo(true);
+    toast('Reply received');
+  } catch (e) {
+    const typing = document.getElementById('chat-typing');
+    if (typing) typing.remove();
+    if (msgEl) {
+      msgEl.innerHTML += `<div class="chat-bubble assistant"><div class="chat-meta">System</div><div class="chat-md">${escHtml(e.message)}</div></div>`;
+      msgEl.scrollTop = msgEl.scrollHeight;
+    }
+    toast('Chat failed');
+  }
+}
+
+function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escAttr(s) { return escHtml(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+function friendlySessionName(key, agentId){
+  const raw = String(key||'').replace(`agent:${agentId}:`, '');
+  const m = raw.match(/(\+\d{8,15})/);
+  if (m) return m[1];
+  if (raw.includes('main')) return 'Main chat';
+  if (raw.includes('cron:')) return 'Scheduled run';
+  return raw.replace(/[:_-]+/g,' ').trim() || 'Conversation';
+}
+function renderMarkdownSafe(md) {
+  let t = escHtml(md || '');
+  t = t.replace(/^###\s+(.*)$/gm, '<p><strong>$1</strong></p>');
+  t = t.replace(/^##\s+(.*)$/gm, '<p><strong>$1</strong></p>');
+  t = t.replace(/^#\s+(.*)$/gm, '<p><strong>$1</strong></p>');
+  t = t.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+  t = t.replace(/\*(.*?)\*/g, '<em>$1</em>');
+  t = t.replace(/`([^`]+)`/g, '<code>$1</code>');
+  t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener" style="color:var(--blue)">$1</a>');
+  const blocks = t.split(/\n\n+/).map(p => `<p>${p.replace(/\n/g,'<br/>')}</p>`);
+  return blocks.join('');
+}
 
 // ---- Init ----
-refreshAll();
-setInterval(refreshAll, 30000);
+refreshAll(true);
+setInterval(() => {
+  if (currentTab === 'convos') {
+    refreshAll(false); // lightweight convo refresh + status update
+  } else {
+    refreshAll(false);
+  }
+}, 8000);
 </script>
 </body>
 </html>
