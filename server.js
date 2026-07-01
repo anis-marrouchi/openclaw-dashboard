@@ -11,6 +11,7 @@ const CRON_PATH = process.env.OPENCLAW_CRON_PATH || '/home/clawd/.openclaw/cron/
 const AGENTS_DIR = process.env.OPENCLAW_AGENTS_DIR || '/home/clawd/.openclaw/agents';
 const FORENSICS_PATH = process.env.FORENSICS_LEDGER_PATH || '/home/clawd/agents/qa-forensics-workspace/memory/forensics-pipeline.json';
 const SOURCES_PATH = process.env.DASHBOARD_SOURCES_PATH || path.join(__dirname, 'sources.json');
+const AUTH_TOKEN = process.env.DASHBOARD_AUTH_TOKEN || '';
 
 const GITLAB_TOKEN = process.env.GITLAB_TOKEN || '';
 const GITLAB_URL = process.env.GITLAB_URL || 'https://gitlab.noqta.tn/api/v4';
@@ -267,11 +268,21 @@ function withSourceTag(data, sourceId) {
 
 const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', '*');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
   const url = new URL(req.url, `http://${req.headers.host}`);
   const route = url.pathname;
+
+  if (AUTH_TOKEN && route.startsWith('/api/')) {
+    const authHeader = req.headers['authorization'] || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    if (token !== AUTH_TOKEN) {
+      res.writeHead(401, { 'Content-Type': 'application/json', 'WWW-Authenticate': 'Bearer realm="openclaw-dashboard"' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      return;
+    }
+  }
 
   if (route === '/api/sources') {
     const sources = loadSources();

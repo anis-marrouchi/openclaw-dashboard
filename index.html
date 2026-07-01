@@ -142,6 +142,7 @@ code { font-family:'SF Mono',Consolas,monospace; font-size:11px; background:var(
       <option value="server">Server</option>
       <option value="mac">Mac</option>
     </select>
+    <button class="btn" id="logout-btn" onclick="doLogout()" title="Logout" style="display:none">Logout</button>
     <button class="btn" onclick="refreshAll()" title="Refresh">Refresh</button>
   </div>
 </div>
@@ -191,7 +192,54 @@ code { font-family:'SF Mono',Consolas,monospace; font-size:11px; background:var(
   </div>
 </div>
 
+<!-- Auth overlay -->
+<div class="overlay" id="auth-overlay" style="z-index:500">
+  <div class="modal" style="width:360px">
+    <h2>// Access Required</h2>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:4px">Enter your dashboard access token to continue.</p>
+    <label>Token</label>
+    <input type="password" id="auth-token-input" placeholder="paste token here..." onkeydown="if(event.key==='Enter')doLogin()">
+    <div id="auth-error" style="color:var(--red);font-size:11px;margin-top:6px;display:none">Invalid token. Try again.</div>
+    <div class="modal-foot">
+      <button class="btn btn-primary" onclick="doLogin()">Unlock</button>
+    </div>
+  </div>
+</div>
+
 <script>
+// ---- Auth ----
+const AUTH_KEY = 'openclaw:dashboard:token';
+let authToken = localStorage.getItem(AUTH_KEY) || '';
+
+function getAuthHeaders() {
+  return authToken ? { 'Authorization': 'Bearer ' + authToken } : {};
+}
+
+function showLogin(showError) {
+  document.getElementById('auth-overlay').classList.add('open');
+  const errEl = document.getElementById('auth-error');
+  if (errEl) errEl.style.display = showError ? '' : 'none';
+  const inp = document.getElementById('auth-token-input');
+  if (inp) { inp.value = ''; inp.focus(); }
+}
+
+function doLogin() {
+  const val = (document.getElementById('auth-token-input').value || '').trim();
+  if (!val) return;
+  authToken = val;
+  localStorage.setItem(AUTH_KEY, authToken);
+  document.getElementById('auth-overlay').classList.remove('open');
+  document.getElementById('logout-btn').style.display = '';
+  refreshAll(true);
+}
+
+function doLogout() {
+  authToken = '';
+  localStorage.removeItem(AUTH_KEY);
+  document.getElementById('logout-btn').style.display = 'none';
+  showLogin(false);
+}
+
 // ---- Config ----
 const API = '';  // same origin
 const COLORS = {
@@ -211,7 +259,8 @@ let suppressAutoScrollOnce = false;
 // ---- Fetch ----
 async function api(path) {
   try {
-    const r = await fetch(API+path);
+    const r = await fetch(API+path, { headers: getAuthHeaders() });
+    if (r.status === 401) { showLogin(!!authToken); return null; }
     return await r.json();
   } catch(e) { console.error(path,e); return null; }
 }
@@ -464,7 +513,7 @@ async function doSendMsg() {
   try {
     const r = await fetch('/api/chat', {
       method:'POST',
-      headers:{'Content-Type':'application/json'},
+      headers:{'Content-Type':'application/json', ...getAuthHeaders()},
       body: JSON.stringify({ agentId: agent, message: text, source, timeoutSeconds: 120 })
     });
     const data = await r.json();
@@ -718,7 +767,7 @@ async function sendChat() {
   try {
     const r = await fetch('/api/chat', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
       body: JSON.stringify({ agentId: convoAgent, message: text, source: convoSource, timeoutSeconds: 180 })
     });
     const data = await r.json();
@@ -761,6 +810,7 @@ function renderMarkdownSafe(md) {
 }
 
 // ---- Init ----
+if (authToken) document.getElementById('logout-btn').style.display = '';
 refreshAll(true);
 setInterval(() => {
   if (currentTab === 'convos') {
